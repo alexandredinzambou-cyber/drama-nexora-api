@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReelShort Probe</title>
+  <link rel="stylesheet" href="/frontend/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="mast">
+      <div>
+        <p class="kicker">ReelShort API</p>
+        <h1>Drama probe</h1>
+      </div>
+      <form id="searchForm" class="search">
+        <select id="langSelect" aria-label="Langue">
+          <option value="fr" selected>FR</option>
+          <option value="en">EN</option>
+          <option value="id">ID</option>
+          <option value="es">ES</option>
+          <option value="pt">PT</option>
+          <option value="de">DE</option>
+        </select>
+        <input id="searchInput" type="search" value="love" placeholder="Chercher un drama" aria-label="Chercher un drama">
+        <button type="submit">Search</button>
+      </form>
+    </section>
+
+    <section class="toolbar" aria-label="Rayons">
+      <button class="pill is-active" data-shelf="search">Recherche</button>
+    </section>
+
+    <section class="layout">
+      <aside class="rail">
+        <div class="rail-head">
+          <h2 id="listTitle">Resultats</h2>
+          <span id="countBadge">0</span>
+        </div>
+        <div id="status" class="status">Chargement...</div>
+        <div id="bookGrid" class="book-grid" aria-live="polite"></div>
+        <button id="loadMore" class="load-more" type="button" hidden>Plus</button>
+      </aside>
+
+      <section class="stage">
+        <div class="viewer">
+          <video id="player" controls playsinline poster=""></video>
+          <div id="emptyPlayer" class="empty-player">
+            <span>Choisis un episode</span>
+          </div>
+        </div>
+        <div id="subtitleStatus" class="subtitle-status" hidden>Sous-titres</div>
+
+        <div class="details">
+          <div>
+            <p id="selectedMeta" class="kicker">Aucun drama selectionne</p>
+            <h2 id="selectedTitle">Pret a tester le flux</h2>
+          </div>
+          <div id="videoUrlBox" class="video-url-box" hidden>
+            <input id="videoUrlInput" type="text" readonly aria-label="URL video">
+            <div class="url-actions">
+              <a id="rawLink" class="raw-link" href="#" target="_blank" rel="noreferrer">Ouvrir</a>
+              <button id="copyUrl" class="raw-link" type="button">Copier</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="episodes" class="episodes"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+  <script src="/frontend/app.js"></script>
+</body>
+</html>

@@ -1,9 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory, has_request_context
 from flask_restx import Api, Resource, fields, reqparse
 import requests
 import re
 import json
 import logging
+import os
+import unicodedata
+from urllib.parse import quote, quote_plus
 
 # Setup logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -23,6 +26,16 @@ api = Api(
 )
 
 ns = api.namespace('reelshort', description='Operasi ReelShort')
+
+
+@app.route('/')
+def frontend_index():
+    return send_from_directory('frontend', 'index.html')
+
+
+@app.route('/frontend/<path:filename>')
+def frontend_assets(filename):
+    return send_from_directory('frontend', filename)
 
 # ============== MODELS ==============
 search_result_model = api.model('SearchResult', {
@@ -88,11 +101,14 @@ error_model = api.model('Error', {
 class ReelShortAPI:
     """Kelas untuk berinteraksi dengan API ReelShort"""
 
-    def __init__(self):
+    SUPPORTED_LOCALES = {"fr", "en", "id", "es", "pt", "de"}
+
+    def __init__(self, locale=None):
+        self.locale = self._normalize_locale(locale or os.environ.get("REELSHORT_LOCALE", "fr"))
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+            "Accept-Language": f"{self.locale},{self.locale}-{self.locale.upper()};q=0.9,en;q=0.8",
             "Referer": "https://www.reelshort.com/",
             "Origin": "https://www.reelshort.com"
         }
@@ -100,10 +116,21 @@ class ReelShortAPI:
         self.build_id = None
         self._update_build_id()
 
+    def _normalize_locale(self, locale):
+        locale = (locale or "fr").lower().split("-")[0]
+        return locale if locale in self.SUPPORTED_LOCALES else "fr"
+
+    def set_locale(self, locale):
+        locale = self._normalize_locale(locale)
+        if locale != self.locale:
+            self.locale = locale
+            self.headers["Accept-Language"] = f"{self.locale},{self.locale}-{self.locale.upper()};q=0.9,en;q=0.8"
+            self._update_build_id()
+
     def _update_build_id(self):
         """Get latest build ID from ReelShort homepage"""
         try:
-            home_url = "https://www.reelshort.com/id"
+            home_url = f"https://www.reelshort.com/{self.locale}"
             logger.info(f"Fetching build ID from {home_url}")
             response = requests.get(home_url, headers=self.headers, timeout=10)
             response.raise_for_status()
@@ -112,14 +139,14 @@ class ReelShortAPI:
             build_id_match = re.search(r'"buildId":"([^"]+)"', response.text)
             if build_id_match:
                 self.build_id = build_id_match.group(1)
-                self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/id"
+                self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/{self.locale}"
                 logger.info(f"Successfully updated build ID: {self.build_id}")
             else:
                 # Try alternative pattern
-                build_id_match = re.search(r'/id/_next/data/([^/]+)/', response.text)
+                build_id_match = re.search(rf'/{self.locale}/_next/data/([^/]+)/', response.text)
                 if build_id_match:
                     self.build_id = build_id_match.group(1)
-                    self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/id"
+                    self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/{self.locale}"
                     logger.info(f"Updated build ID (alt pattern): {self.build_id}")
                 else:
                     raise Exception("Build ID pattern not found in HTML")
@@ -128,7 +155,7 @@ class ReelShortAPI:
             logger.error(f"Error getting build ID: {e}")
             # Fallback to hardcoded build ID (may need manual update)
             self.build_id = "acf624d"
-            self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/id"
+            self.base_url = f"https://www.reelshort.com/_next/data/{self.build_id}/{self.locale}"
             logger.warning(f"Using fallback build ID: {self.build_id}")
 
     def _make_request(self, url):
@@ -140,9 +167,10 @@ class ReelShortAPI:
             # If we get HTML instead of JSON, build ID might be expired
             if 'text/html' in response.headers.get('Content-Type', ''):
                 logger.warning("Received HTML instead of JSON, build ID may be expired")
+                old_build_id = self.build_id
                 self._update_build_id()
                 # Retry with new build ID
-                url = url.replace(f"/_next/data/{self.build_id}/id", f"/_next/data/{self.build_id}/id")
+                url = url.replace(f"/_next/data/{old_build_id}/", f"/_next/data/{self.build_id}/")
                 response = requests.get(url, headers=self.headers, timeout=15)
             
             response.raise_for_status()
@@ -155,10 +183,12 @@ class ReelShortAPI:
             logger.error(f"JSON decode error: {e}")
             raise
 
-    def search(self, keywords):
+    def search(self, keywords, page=1):
         """Mencari drama/buku berdasarkan keyword"""
-        encoded_keywords = keywords.replace(" ", "+")
+        encoded_keywords = quote_plus(keywords)
         url = f"{self.base_url}/search.json?keywords={encoded_keywords}"
+        if page > 1:
+            url = f"{url}&page={page}"
 
         try:
             data = self._make_request(url)
@@ -181,7 +211,8 @@ class ReelShortAPI:
 
     def get_episodes(self, book_id, filtered_title):
         """Mendapatkan daftar episode dari sebuah buku"""
-        url = f"{self.base_url}/movie/{filtered_title}-{book_id}.json?slug={filtered_title}-{book_id}"
+        slug = quote(filtered_title, safe='')
+        url = f"{self.base_url}/movie/{slug}-{book_id}.json?slug={slug}-{book_id}"
 
         try:
             data = self._make_request(url)
@@ -190,8 +221,11 @@ class ReelShortAPI:
 
             results = []
             for ep in episodes:
+                episode_num = ep.get("serial_number")
+                if episode_num is None or episode_num < 1:
+                    continue
                 results.append({
-                    "episode": ep.get("serial_number"),
+                    "episode": episode_num,
                     "chapter_id": ep.get("chapter_id")
                 })
             return results
@@ -201,7 +235,9 @@ class ReelShortAPI:
 
     def get_video_url(self, episode_num, filtered_title, book_id, chapter_id):
         """Mendapatkan URL video dari sebuah episode"""
-        url = f"{self.base_url}/episodes/episode-{episode_num}-{filtered_title}-{book_id}-{chapter_id}.json?play_time=1&slug=episode-{episode_num}-{filtered_title}-{book_id}-{chapter_id}"
+        slug = quote(filtered_title, safe='')
+        episode_slug = f"episode-{episode_num}-{slug}-{book_id}-{chapter_id}"
+        url = f"{self.base_url}/episodes/{episode_slug}.json?play_time=1&slug={episode_slug}"
 
         try:
             data = self._make_request(url)
@@ -218,7 +254,7 @@ class ReelShortAPI:
 
     def _get_raw_bookshelves(self):
         """Get raw bookshelf data from ReelShort"""
-        target_url = f"https://www.reelshort.com/_next/data/{self.build_id}/id.json"
+        target_url = f"https://www.reelshort.com/_next/data/{self.build_id}/{self.locale}.json"
         logger.info(f"Fetching bookshelves from: {target_url}")
         
         try:
@@ -227,8 +263,15 @@ class ReelShortAPI:
             # Debug: print structure
             page_props = data.get("pageProps", {})
             fallback = page_props.get("fallback", {})
-            hall_info = fallback.get("/api/video/hall/info", {})
-            book_shelf_list = hall_info.get("bookShelfList", [])
+            hall_info = (
+                fallback.get("/api/video/hall/info")
+                or fallback.get("/api/ms/hall/webInfo")
+                or {}
+            )
+            book_shelf_list = [
+                shelf for shelf in hall_info.get("bookShelfList", [])
+                if shelf.get("bookshelf_name")
+            ]
             
             logger.info(f"Found {len(book_shelf_list)} bookshelves")
             for shelf in book_shelf_list:
@@ -281,7 +324,7 @@ class ReelShortAPI:
             filtered_title = self._filter_title(book_title)
             
             # Dapatkan book_id dari hasil search menggunakan filtered_title
-            book_id = self._get_book_id_from_search(filtered_title)
+            book_id = book.get("book_id") or self._get_book_id_from_search(filtered_title)
             
             book_info = {
                 "book_title": book_title,
@@ -294,6 +337,14 @@ class ReelShortAPI:
             }
             
             chapter_base = book.get("chapter_base", [])
+            if not chapter_base and book.get("chapter_id"):
+                chapter_base = [{
+                    "chapter_id": book.get("chapter_id"),
+                    "chapter_name": "Episode 1",
+                    "like_count": None,
+                    "publish_at": None,
+                    "create_time": None
+                }]
             # FULL - no limit, take all chapters
             for chapter in chapter_base:
                 chapter_info = {
@@ -316,7 +367,12 @@ class ReelShortAPI:
             return None, "Failed to fetch bookshelf data"
         
         for shelf in book_shelf_list:
-            if shelf.get("bookshelf_name") == "Drama dengan Dub🎧":
+            shelf_name = shelf.get("bookshelf_name", "")
+            if (
+                shelf_name.startswith("Drama dengan Dub")
+                or shelf_name.startswith("Série Doublée")
+                or shelf_name.startswith("Dubbed")
+            ):
                 return self._parse_shelf_data(shelf), None
         
         # List available shelves for debugging
@@ -330,7 +386,12 @@ class ReelShortAPI:
             return None, "Failed to fetch bookshelf data"
         
         for shelf in book_shelf_list:
-            if shelf.get("bookshelf_name") == "Rilis Baru💥":
+            shelf_name = shelf.get("bookshelf_name", "")
+            if (
+                shelf_name.startswith("Rilis Baru")
+                or shelf_name.startswith("Nouvelles")
+                or shelf_name.startswith("New")
+            ):
                 return self._parse_shelf_data(shelf), None
         
         available = [s.get("bookshelf_name") for s in book_shelf_list]
@@ -343,26 +404,92 @@ class ReelShortAPI:
             return None, "Failed to fetch bookshelf data"
         
         for shelf in book_shelf_list:
-            if shelf.get("bookshelf_name") == "Lebih Direkomendasikan 🔍":
+            shelf_name = shelf.get("bookshelf_name", "")
+            if (
+                shelf_name.startswith("Lebih Direkomendasikan")
+                or shelf_name.startswith("Recommandation")
+                or shelf_name.startswith("Recommended")
+            ):
                 return self._parse_shelf_data(shelf), None
         
         available = [s.get("bookshelf_name") for s in book_shelf_list]
         return None, f"'Lebih Direkomendasikan' not found. Available: {available}"
 
+    def get_all_bookshelves(self):
+        """Get all available bookshelves for the active locale."""
+        book_shelf_list = self._get_raw_bookshelves()
+        if book_shelf_list is None:
+            return None, "Failed to fetch bookshelf data"
+
+        return {
+            "bookshelves": [
+                self._parse_shelf_data(shelf)
+                for shelf in book_shelf_list
+            ]
+        }, None
+
     def _filter_title(self, title):
         """Membersihkan judul untuk digunakan dalam URL"""
-        filtered = title.lower()
-        filtered = re.sub(r'[^a-z0-9]+', ' ', filtered)
+        filtered = unicodedata.normalize('NFC', title.lower())
+        filtered = ''.join(char if char.isalnum() else ' ' for char in filtered)
         filtered = re.sub(r'\s+', ' ', filtered).strip()
         filtered = filtered.replace(' ', '-')
         return filtered
 
 
-reelshort_client = ReelShortAPI()
+class ReelShortClientPool:
+    def __init__(self):
+        self.clients = {}
+
+    def _locale(self, locale=None):
+        if locale is None and has_request_context():
+            locale = request.args.get('lang')
+        locale = (locale or os.environ.get("REELSHORT_LOCALE", "fr")).lower().split("-")[0]
+        return locale if locale in ReelShortAPI.SUPPORTED_LOCALES else "fr"
+
+    def _client(self, locale=None):
+        locale = self._locale(locale)
+        if locale not in self.clients:
+            self.clients[locale] = ReelShortAPI(locale)
+        return self.clients[locale]
+
+    def set_locale(self, locale):
+        self._client(locale)
+
+    def search(self, keywords, page=1):
+        return self._client().search(keywords, page)
+
+    def get_episodes(self, book_id, filtered_title):
+        return self._client().get_episodes(book_id, filtered_title)
+
+    def get_video_url(self, episode_num, filtered_title, book_id, chapter_id):
+        return self._client().get_video_url(episode_num, filtered_title, book_id, chapter_id)
+
+    def get_drama_dub(self):
+        return self._client().get_drama_dub()
+
+    def get_new_release(self):
+        return self._client().get_new_release()
+
+    def get_recommended(self):
+        return self._client().get_recommended()
+
+    def get_all_bookshelves(self):
+        return self._client().get_all_bookshelves()
+
+
+reelshort_client = ReelShortClientPool()
+
+
+@app.before_request
+def apply_reelshort_locale():
+    if request.path.startswith('/api/v1/reelshort'):
+        reelshort_client.set_locale(request.args.get('lang'))
 
 # ============== PARSERS ==============
 search_parser = reqparse.RequestParser()
 search_parser.add_argument('keywords', type=str, required=True, help='Kata kunci pencarian', location='args')
+search_parser.add_argument('page', type=int, required=False, default=1, help='Page de resultats search', location='args')
 
 episodes_parser = reqparse.RequestParser()
 episodes_parser.add_argument('filtered_title', type=str, required=True, help='Slug dari hasil search', location='args')
@@ -391,11 +518,12 @@ class SearchResource(Resource):
         """STEP 1: Cari drama berdasarkan kata kunci"""
         args = search_parser.parse_args()
         keywords = args['keywords']
+        page = max(args.get('page') or 1, 1)
 
         if not keywords:
             api.abort(400, 'Keywords required')
 
-        results = reelshort_client.search(keywords)
+        results = reelshort_client.search(keywords, page)
         return {'results': results}
 
 
@@ -550,6 +678,26 @@ class RecommendResource(Resource):
             else:
                 api.abort(404, error)
         
+        return result
+
+
+@ns.route('/bookshelves')
+class BookshelvesResource(Resource):
+    """Get all bookshelves available for the selected locale"""
+
+    @ns.doc(
+        'get_bookshelves',
+        description='Mendapatkan semua bookshelf yang tersedia untuk locale aktif.'
+    )
+    @ns.response(200, 'Success')
+    @ns.response(500, 'Server Error', error_model)
+    def get(self):
+        """Get all localized bookshelves"""
+        result, error = reelshort_client.get_all_bookshelves()
+
+        if error:
+            api.abort(500, error)
+
         return result
 
 
