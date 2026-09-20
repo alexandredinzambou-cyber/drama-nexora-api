@@ -33,6 +33,13 @@ def frontend_index():
     return send_from_directory('frontend', 'index.html')
 
 
+@app.route('/health')
+@app.route('/api/health')  # alias : le guardian NOX sonde /health sur chaque service
+def health():
+    """Health-check pour le serveur NOX et start_all_services."""
+    return jsonify(status='ok', service='reelshort-api', ok=True)
+
+
 @app.route('/frontend/<path:filename>')
 def frontend_assets(filename):
     return send_from_directory('frontend', filename)
